@@ -76,6 +76,12 @@
                     <span class="message-text">Looking for worthy opponents</span>
                     <span class="dots">...</span>
                 </div>
+                <div id="cancelMatchContainer" style="display: none; margin-top: 20px;">
+                    <button id="cancelMatchBtn" class="btn glow-effect">
+                        <span class="btn-icon">❌</span>
+                        Cancel Match
+                    </button>
+                </div>
             </div>
         </div>
 
@@ -122,11 +128,7 @@
                     <div id="opponentMove" class="move-display animate__animated"></div>
                 </div>
                 <p id="resultText" class="result-message animate__animated"></p>
-                <div class="match-stats animate__animated animate__fadeIn animate__delay-1s">
-                    <h3>Match Statistics</h3>
-                    <div id="matchStats" class="stats-grid"></div>
-                </div>
-                <div class="action-buttons animate__animated animate__fadeIn animate__delay-2s">
+                <div class="action-buttons animate__animated animate__fadeIn animate__delay-1s">
                     <div class="rematch-container">
                         <button id="rematchBtn" class="btn" style="display: none;">
                             <span class="btn-icon">🔄</span>
@@ -153,6 +155,16 @@
         let matches = {};  // Store match states
         let rematchTimer = null;
         let lastMatchStake = null;  // Store stake for rematch
+        let isRematch = false;  // Track if current match is a rematch
+        let lastValues = {
+            coins: null,
+            stats: {
+                wins: null,
+                losses: null,
+                draws: null,
+                total_coins_won: null
+            }
+        };
 
         // Initialize socket connection with logging
         socket = io({
@@ -165,6 +177,62 @@
 
         socket.on('connect', () => {
             console.log('Socket connected:', socket.id);
+        });
+
+        // Handle match cancellation
+        socket.on('match_cancelled', (data) => {
+            if (data.match_id === currentMatchId) {
+                currentMatchId = null;
+                isCreator = false;
+                isRematch = false;
+
+                // Update coin balance with animation if provided
+                if (data.coins !== undefined) {
+                    const coinBalance = document.getElementById('coinBalance');
+                    if (coinBalance) {
+                        animateValueChange(coinBalance, lastValues.coins, data.coins);
+                        lastValues.coins = data.coins;
+                    }
+                }
+
+                showScreen('lobbyScreen');
+                updateGameState();
+            }
+        });
+
+        // Add event listener for cancel button
+        document.getElementById('cancelMatchBtn').addEventListener('click', async () => {
+            if (!currentMatchId || !isCreator) return;
+
+            try {
+                const response = await fetch('/api/cancel_match', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        match_id: currentMatchId
+                    })
+                });
+
+                if (!response.ok) {
+                    const data = await response.json();
+                    console.error('Error cancelling match:', data.error);
+                    return;
+                }
+
+                const data = await response.json();
+                if (data.coins !== undefined) {
+                    const coinBalance = document.getElementById('coinBalance');
+                    if (coinBalance) {
+                        animateValueChange(coinBalance, lastValues.coins, data.coins);
+                        lastValues.coins = data.coins;
+                    }
+                }
+                // The match_cancelled event will handle the rest of the UI update
+            } catch (error) {
+                console.error('Error cancelling match:', error);
+            }
         });
 
         socket.on('connect_error', (error) => {
@@ -191,24 +259,27 @@
                 }
                 const data = await response.json();
                 
-                // Update coin balance and stats
+                // Update coin balance and stats with animations
                 const coinBalance = document.getElementById('coinBalance');
                 if (coinBalance) {
-                    coinBalance.textContent = data.coins;
+                    animateValueChange(coinBalance, lastValues.coins, data.coins);
+                    lastValues.coins = data.coins;
                 }
 
                 if (data.stats) {
                     const elements = {
-                        'playerWins': data.stats.wins,
-                        'playerLosses': data.stats.losses,
-                        'playerDraws': data.stats.draws,
-                        'totalCoinsWon': data.stats.total_coins_won
+                        'playerWins': ['wins', data.stats.wins],
+                        'playerLosses': ['losses', data.stats.losses],
+                        'playerDraws': ['draws', data.stats.draws],
+                        'totalCoinsWon': ['total_coins_won', data.stats.total_coins_won]
                     };
 
-                    for (const [id, value] of Object.entries(elements)) {
+                    for (const [id, [key, value]] of Object.entries(elements)) {
                         const element = document.getElementById(id);
                         if (element) {
+                            animateValueChange(element, lastValues.stats[key], value);
                             element.textContent = value;
+                            lastValues.stats[key] = value;
                         }
                     }
                 }
@@ -251,6 +322,40 @@
         }
 
         // Global functions
+        function animateValueChange(element, oldValue, newValue) {
+            if (oldValue === null || oldValue === newValue) {
+                element.textContent = newValue;
+                return;
+            }
+
+            element.classList.add('value-changed');
+            if (newValue > oldValue) {
+                element.classList.add('increased');
+                // Add floating animation element for increase
+                const changeEl = document.createElement('span');
+                changeEl.className = 'coin-change coin-increase';
+                changeEl.textContent = `+${newValue - oldValue}`;
+                element.parentElement.appendChild(changeEl);
+                // Update value immediately with the animation
+                element.textContent = newValue;
+                setTimeout(() => changeEl.remove(), 1000);
+            } else if (newValue < oldValue) {
+                element.classList.add('decreased');
+                // Add floating animation element for decrease
+                const changeEl = document.createElement('span');
+                changeEl.className = 'coin-change coin-decrease';
+                changeEl.textContent = `${newValue - oldValue}`;
+                element.parentElement.appendChild(changeEl);
+                // Update value immediately with the animation
+                element.textContent = newValue;
+                setTimeout(() => changeEl.remove(), 1000);
+            }
+
+            setTimeout(() => {
+                element.classList.remove('value-changed', 'increased', 'decreased');
+            }, 500);
+        }
+
         function showScreen(screenId) {
             console.log('Showing screen:', screenId);
             document.querySelectorAll('.screen').forEach(screen => {
@@ -259,6 +364,14 @@
             const targetScreen = document.getElementById(screenId);
             if (targetScreen) {
                 targetScreen.classList.add('active');
+                
+                // Handle cancel button visibility in waiting screen
+                if (screenId === 'waitingScreen') {
+                    const cancelContainer = document.getElementById('cancelMatchContainer');
+                    if (cancelContainer) {
+                        cancelContainer.style.display = isCreator && !isRematch ? 'block' : 'none';
+                    }
+                }
             } else {
                 console.error('Screen not found:', screenId);
             }
@@ -293,6 +406,11 @@
                         btn.disabled = true;
                         btn.classList.add('animate__animated', 'animate__fadeOut');
                     });
+                    
+                    // Notify server about timeout
+                    if (currentMatchId) {
+                        socket.emit('move_timeout', { match_id: currentMatchId });
+                    }
                 }
             }
             
@@ -370,6 +488,16 @@
                 if (data.success) {
                     currentMatchId = matchId;
                     isCreator = false;
+
+                    // Update balance with animation
+                    const coinBalance = document.getElementById('coinBalance');
+                    if (coinBalance && data.coins !== undefined) {
+                        animateValueChange(coinBalance, lastValues.coins, data.coins);
+                        lastValues.coins = data.coins;
+                        setTimeout(() => {
+                            coinBalance.classList.remove('animate__animated', 'animate__flash');
+                        }, 1000);
+                    }
                     
                     // Join the match room via socket
                     console.log('Joining match room:', matchId);
@@ -462,6 +590,16 @@
                         if (response.ok && data.match_id) {
                             currentMatchId = data.match_id;
                             isCreator = true;
+
+                            // Update balance with animation
+                            const coinBalance = document.getElementById('coinBalance');
+                            if (coinBalance && data.coins !== undefined) {
+                                animateValueChange(coinBalance, lastValues.coins, data.coins);
+                                lastValues.coins = data.coins;
+                                setTimeout(() => {
+                                    coinBalance.classList.remove('animate__animated', 'animate__flash');
+                                }, 1000);
+                            }
 
                             // Join the match room via socket
                             console.log('Joining match room:', data.match_id);
@@ -581,8 +719,10 @@
                     // Reset game state
                     matches[currentMatchId] = {
                         status: 'playing',
-                        start_time: data.start_time
+                        start_time: data.start_time,
+                        is_rematch: data.is_rematch || false
                     };
+                    isRematch = data.is_rematch || false;
                     
                     // Show play screen with animation
                     const playScreen = document.getElementById('playScreen');
@@ -699,29 +839,10 @@
                         resultTextElement.textContent = resultText;
                     }
                     
-                    // Show match stats with animation
-                    const stats = data.match_stats;
+                    // Clear any previous match stats
                     const statsContainer = document.getElementById('matchStats');
-                    if (statsContainer && stats) {
-                        statsContainer.classList.add('animate__animated', 'animate__fadeIn');
-                        statsContainer.innerHTML = `
-                            <div class="stats-item">
-                                <span>Total Rounds:</span>
-                                <span>${stats.rounds}</span>
-                            </div>
-                            <div class="stats-item">
-                                <span>Creator Wins:</span>
-                                <span>${stats.creator_wins}</span>
-                            </div>
-                            <div class="stats-item">
-                                <span>Joiner Wins:</span>
-                                <span>${stats.joiner_wins}</span>
-                            </div>
-                            <div class="stats-item">
-                                <span>Draws:</span>
-                                <span>${stats.draws}</span>
-                            </div>
-                        `;
+                    if (statsContainer) {
+                        statsContainer.innerHTML = '';
                     }
                 }, 1000);
                 
@@ -736,7 +857,8 @@
                 
                 // Reset rematch button state
                 rematchBtn.disabled = false;
-                rematchBtn.classList.remove('animate__pulse', 'animate__infinite');
+                rematchBtn.classList.remove('animate__pulse', 'animate__infinite', 'animate__headShake');
+                rematchBtn.style.color = '';
                 rematchBtn.innerHTML = `
                     <span class="btn-icon">🔄</span>
                     Rematch (<span id="rematchTimer">15</span>s)
@@ -752,7 +874,6 @@
                     
                     // Start rematch timer
                     const updateTimer = () => {
-                        timeLeft--;
                         // Get the timer display element again as it might have been recreated
                         const timerDisplay = document.getElementById('rematchTimer');
                         if (timerDisplay) {
@@ -765,8 +886,9 @@
                             rematchBtn.style.color = 'var(--danger-color)';
                         }
                         
-                        if (timeLeft <= 0) {
-                            clearInterval(rematchTimer);
+                        timeLeft--;
+                        if (timeLeft < 0) {
+                            stopRematchTimer();
                             if (rematchBtn) {
                                 rematchBtn.classList.remove('animate__headShake');
                                 rematchBtn.style.display = 'none';
@@ -783,8 +905,6 @@
                         }
                     };
                     
-                    // Initial timer update
-                    updateTimer();
                     // Start interval
                     rematchTimer = setInterval(updateTimer, 1000);
                     
@@ -792,6 +912,8 @@
                     rematchBtn.onclick = () => {
                         socket.emit('rematch_accepted', { match_id: currentMatchId });
                         rematchBtn.disabled = true;
+                        rematchBtn.classList.remove('animate__headShake', 'animate__pulse', 'animate__infinite');
+                        rematchBtn.style.color = '';
                         rematchBtn.innerHTML = `
                             <span class="btn-icon">🔄</span>
                             Waiting for opponent...
@@ -799,8 +921,10 @@
                         if (rematchStatus) {
                             rematchStatus.textContent = 'Waiting for opponent to accept rematch...';
                         }
+                        stopRematchTimer();
                     };
                 } else {
+                    rematchBtn.style.display = 'none';
                     if (rematchStatus) {
                         rematchStatus.textContent = 'Not enough coins for rematch';
                     }
@@ -844,27 +968,38 @@
 
             socket.on('rematch_started', (data) => {
                 console.log('Rematch started:', data);
-                currentMatchId = data.match_id;
-                isCreator = data.is_creator;
-                
+
                 // Stop rematch timer
                 stopRematchTimer();
-                
+
                 // Clear rematch UI
                 const rematchBtn = document.getElementById('rematchBtn');
                 const rematchStatus = document.getElementById('rematchStatus');
                 if (rematchBtn) {
                     rematchBtn.style.display = 'none';
+                    rematchBtn.disabled = false;
+                    rematchBtn.classList.remove('animate__headShake', 'animate__pulse', 'animate__infinite');
+                    rematchBtn.style.color = '';
                 }
                 if (rematchStatus) {
                     rematchStatus.textContent = '';
+                    rematchStatus.classList.remove('animate__fadeOut');
                 }
-                
-                // Clear any existing timers
-                if (rematchTimer) {
-                    clearInterval(rematchTimer);
-                    rematchTimer = null;
+
+                // Update balance with animation
+                const coinBalance = document.getElementById('coinBalance');
+                if (coinBalance && data.coins !== undefined) {
+                    animateValueChange(coinBalance, lastValues.coins, data.coins);
+                    lastValues.coins = data.coins;
+                    setTimeout(() => {
+                        coinBalance.classList.remove('animate__animated', 'animate__flash');
+                    }, 1000);
                 }
+
+                // Update match state
+                currentMatchId = data.match_id;
+                isCreator = data.is_creator;
+                isRematch = data.is_rematch || false;
                 
                 // Show waiting screen
                 showScreen('waitingScreen');
